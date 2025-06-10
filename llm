@@ -1,0 +1,120 @@
+import pandas as pd
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+from langchain_openai import AzureChatOpenAI
+from langchain_core.output_parsers import StrOutputParser
+from tqdm import tqdm
+import logging
+import os
+
+# Configure environment variables
+os.environ["AZURE_OPENAI_API_KEY"] = "fc3498dfabef692d"
+os.environ["AZURE_OPENAI_ENDPOINT"] = "https://hexavarsity-secureapi.azurewebsites.net/api/azureai"
+
+class AzureTicketClassifier:
+    def _init_(self):
+        """Initialize the classifier with Azure OpenAI settings"""
+        self.llm = AzureChatOpenAI(
+            deployment_name="gpt-4o",
+            openai_api_version="2024-02-01",
+            temperature=0.0,
+            max_retries=3,
+            streaming=False
+        )
+        
+        # Enhanced classification prompt
+        self.prompt_template = PromptTemplate(
+            input_variables=["ticket_text"],
+            template="""
+            [SYSTEM]
+            You are an expert ticket classification system. Analyze each ticket and classify strictly as:
+            - 'non_iti' for valid non-IT infrastructure tickets
+            - 'rubbish' for invalid/spam/irrelevant tickets
+
+            [RULES]
+            NON_ITI TICKETS:
+            - Business applications (CRM, ERP, HR systems)
+            - Office equipment/facilities requests
+            - Department-specific service requests
+            - Non-technical administrative requests
+
+            RUBBISH TICKETS:
+            - Gibberish/random characters
+            - Test tickets (e.g., "test", "12345")
+            - Spam/advertising content
+            - Personal messages/complaints
+            - Incomplete/unintelligible text
+
+            [FORMAT]
+            Respond ONLY with either 'non_iti' or 'rubbish' - no other text.
+
+            [TICKET]
+            {ticket_text}
+
+            [CLASSIFICATION]
+            """
+        )
+        
+        self.classification_chain = LLMChain(
+            llm=self.llm,
+            prompt=self.prompt_template,
+            output_parser=StrOutputParser(),
+            verbose=False
+        )
+
+    def classify_ticket(self, ticket_text: str) -> str:
+        """Classify a single ticket with error handling"""
+        try:
+            if not isinstance(ticket_text, str) or len(ticket_text.strip()) == 0:
+                return "rubbish"
+                
+            result = self.classification_chain.run(ticket_text=ticket_text)
+            return result.strip().lower() if result else "error"
+        except Exception as e:
+            logging.error(f"Classification error: {str(e)}")
+            return "error"
+
+    def process_csv(self, input_file: str, output_file: str) -> pd.DataFrame:
+        """Process CSV file with progress tracking"""
+        try:
+            df = pd.read_csv(input_file)
+            
+            # Validate CSV structure
+            if not all(col in df.columns for col in ['Document', 'Category']):
+                raise ValueError("CSV must contain 'Document' and 'Category' columns")
+            
+            # Classify with progress bar
+            tqdm.pandas(desc="Classifying Tickets")
+            df['LLM_Classification'] = df['Document'].progress_apply(
+                lambda x: self.classify_ticket(x) if pd.notna(x) else "rubbish"
+            )
+            
+            # Save results
+            df.to_csv(output_file, index=False)
+            logging.info(f"Processed {len(df)} tickets. Results saved to {output_file}")
+            return df
+            
+        except Exception as e:
+            logging.error(f"CSV processing failed: {str(e)}")
+            raise
+
+# Example Usage
+if _name_ == "_main_":
+    # Initialize classifier
+    classifier = AzureTicketClassifier()
+    
+    # File paths
+    input_csv = "regex_non_iti_tickets.csv"
+    output_csv = "classified_tickets_output.csv"
+    
+    try:
+        print("Starting ticket classification...")
+        results = classifier.process_csv(input_csv, output_csv)
+        
+        # Print summary statistics
+        print("\nClassification Summary:")
+        print(results['LLM_Classification'].value_counts())
+        print(f"\nSuccessfully processed {len(results)} tickets!")
+        
+    except Exception as e:
+        print(f"Error occurred: {str(e)}")
